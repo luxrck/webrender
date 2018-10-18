@@ -2679,6 +2679,8 @@ impl<B: hal::Backend> Renderer<B>
 
         if scissor_rect.is_some() {
             self.device.enable_scissor();
+            #[cfg(not(feature = "gleam"))]
+            self.device.set_scissor_rect(scissor_rect.unwrap());
         }
     }
 
