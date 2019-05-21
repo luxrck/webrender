@@ -4349,8 +4349,6 @@ impl<B: hal::Backend> Renderer<B> {
             self.device.delete_external_texture(ext);
         }
         self.device.end_frame();
-        #[cfg(not(feature = "gleam"))]
-        self.device.deinit();
     }
 
     fn size_of<T>(&self, ptr: *const T) -> usize {

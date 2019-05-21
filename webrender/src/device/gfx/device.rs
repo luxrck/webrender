@@ -121,15 +121,15 @@ struct Fence<B: hal::Backend> {
 }
 
 pub struct Device<B: hal::Backend> {
-    pub device: B::Device,
-    heaps: Heaps<B>,
+    pub device: Option<B::Device>,
+    heaps: Option<Heaps<B>>,
     pub limits: hal::Limits,
     adapter: hal::Adapter<B>,
     surface: Option<B::Surface>,
     _instance: Box<hal::Instance<Backend = B>>,
     pub surface_format: ImageFormat,
     pub depth_format: hal::format::Format,
-    pub queue_group: hal::QueueGroup<B, hal::Graphics>,
+    pub queue_group: Option<hal::QueueGroup<B, hal::Graphics>>,
     pub command_pool: SmallVec<[CommandPool<B>; 1]>,
     staging_buffer_pool: SmallVec<[BufferPool<B>; 1]>,
     pub swap_chain: Option<B::Swapchain>,
@@ -140,8 +140,8 @@ pub struct Device<B: hal::Backend> {
     frame_depths: Vec<DepthBuffer<B>>,
     pub frame_count: usize,
     pub viewport: hal::pso::Viewport,
-    pub sampler_linear: B::Sampler,
-    pub sampler_nearest: B::Sampler,
+    pub sampler_linear: Option<B::Sampler>,
+    pub sampler_nearest: Option<B::Sampler>,
     pub current_frame_id: usize,
     current_blend_state: Cell<BlendState>,
     blend_color: Cell<ColorF>,
@@ -154,8 +154,8 @@ pub struct Device<B: hal::Backend> {
     fbos: FastHashMap<FBOId, Framebuffer<B>>,
     rbos: FastHashMap<RBOId, DepthBuffer<B>>,
     descriptor_pools: SmallVec<[DescriptorPools<B>; 1]>,
-    descriptor_pools_global: DescriptorPools<B>,
-    descriptor_pools_sampler: DescriptorPools<B>,
+    descriptor_pools_global: Option<DescriptorPools<B>>,
+    descriptor_pools_sampler: Option<DescriptorPools<B>>,
     // device state
     bound_textures: [u32; 16],
     bound_program: ProgramId,
@@ -198,8 +198,8 @@ pub struct Device<B: hal::Backend> {
 
     next_id: usize,
     frame_fence: SmallVec<[Fence<B>; 1]>,
-    image_available_semaphore: B::Semaphore,
-    render_finished_semaphore: B::Semaphore,
+    image_available_semaphore: Option<B::Semaphore>,
+    render_finished_semaphore: Option<B::Semaphore>,
     pipeline_requirements: FastHashMap<String, PipelineRequirements>,
     pipeline_layouts: FastHashMap<ShaderKind, B::PipelineLayout>,
     pipeline_cache: Option<B::PipelineCache>,
@@ -448,15 +448,15 @@ impl<B: hal::Backend> Device<B> {
         };
 
         Device {
-            device,
-            heaps,
+            device: Some(device),
+            heaps: Some(heaps),
             limits,
             surface_format,
             adapter,
             surface,
             _instance: instance,
             depth_format,
-            queue_group,
+            queue_group: Some(queue_group),
             command_pool,
             staging_buffer_pool,
             swap_chain: swap_chain,
@@ -467,8 +467,8 @@ impl<B: hal::Backend> Device<B> {
             frame_depths,
             frame_count,
             viewport,
-            sampler_linear,
-            sampler_nearest,
+            sampler_linear: Some(sampler_linear),
+            sampler_nearest: Some(sampler_nearest),
             current_frame_id: 0,
             current_blend_state: Cell::new(BlendState::Off),
             current_depth_test: DepthTest::Off,
@@ -493,8 +493,8 @@ impl<B: hal::Backend> Device<B> {
             fbos: FastHashMap::default(),
             rbos: FastHashMap::default(),
             descriptor_pools,
-            descriptor_pools_global,
-            descriptor_pools_sampler,
+            descriptor_pools_global: Some(descriptor_pools_global),
+            descriptor_pools_sampler: Some(descriptor_pools_sampler),
             bound_textures: [0; 16],
             bound_program: INVALID_PROGRAM_ID,
             bound_sampler: [TextureFilter::Linear; 16],
@@ -511,8 +511,8 @@ impl<B: hal::Backend> Device<B> {
 
             next_id: 0,
             frame_fence,
-            image_available_semaphore,
-            render_finished_semaphore,
+            image_available_semaphore: Some(image_available_semaphore),
+            render_finished_semaphore: Some(render_finished_semaphore),
             pipeline_requirements,
             pipeline_layouts: FastHashMap::default(),
             pipeline_cache,
@@ -554,31 +554,33 @@ impl<B: hal::Backend> Device<B> {
     }
 
     pub(crate) fn recreate_swapchain(&mut self, window_size: Option<(i32, i32)>) -> DeviceIntSize {
-        self.device.wait_idle().unwrap();
+        let device = self.device.as_ref().unwrap();
+
+        device.wait_idle().unwrap();
 
         for (_id, program) in self.programs.drain() {
-            program.deinit(&self.device, &mut self.heaps);
+            program.deinit(device, self.heaps.as_mut().unwrap());
         }
 
         for image in self.frame_images.drain(..) {
-            image.deinit(&self.device, &mut self.heaps);
+            image.deinit(device, self.heaps.as_mut().unwrap());
         }
 
         for depth in self.frame_depths.drain(..) {
-            depth.deinit(&self.device, &mut self.heaps);
+            depth.deinit(device, self.heaps.as_mut().unwrap());
         }
 
-        self.render_pass.take().unwrap().deinit(&self.device);
+        self.render_pass.take().unwrap().deinit(device);
 
-        self.descriptor_pools_global.reset(&self.device);
-        self.descriptor_pools_sampler.reset(&self.device);
+        self.descriptor_pools_global.as_mut().unwrap().reset(device);
+        self.descriptor_pools_sampler.as_mut().unwrap().reset(device);
 
         unsafe {
             for framebuffer in self.framebuffers.drain(..) {
-                self.device.destroy_framebuffer(framebuffer);
+                device.destroy_framebuffer(framebuffer);
             }
             for framebuffer_depth in self.framebuffers_depth.drain(..) {
-                self.device.destroy_framebuffer(framebuffer_depth);
+                device.destroy_framebuffer(framebuffer_depth);
             }
         }
 
@@ -598,7 +600,7 @@ impl<B: hal::Backend> Device<B> {
             _frame_count,
         ) = if let Some (ref mut surface) = self.surface {
             unsafe {
-                self.device
+                device
                     .destroy_swapchain(self.swap_chain.take().unwrap());
             }
             let (
@@ -613,8 +615,8 @@ impl<B: hal::Backend> Device<B> {
                 viewport,
                 frame_count,
             ) = Device::init_swapchain_resources(
-                &self.device,
-                &mut self.heaps,
+                device,
+                self.heaps.as_mut().unwrap(),
                 &self.adapter,
                 surface,
                 window_size,
@@ -642,7 +644,7 @@ impl<B: hal::Backend> Device<B> {
                 frame_images,
                 viewport,
                 frame_count,
-            ) = Device::init_resources_without_surface(&self.device, &mut self.heaps, window_size);
+            ) = Device::init_resources_without_surface(device, self.heaps.as_mut().unwrap(), window_size);
             (
                 None,
                 surface_format,
@@ -667,14 +669,14 @@ impl<B: hal::Backend> Device<B> {
         self.surface_format = surface_format;
         self.depth_format = depth_format;
 
-        let pipeline_cache = unsafe { self.device.create_pipeline_cache(None) }
+        let pipeline_cache = unsafe { device.create_pipeline_cache(None) }
             .expect("Failed to create pipeline cache");
         if let Some(ref cache) = self.pipeline_cache {
             unsafe {
-                self.device
+                device
                     .merge_pipeline_caches(&cache, Some(&pipeline_cache))
-                    .expect("merge_pipeline_caches failed");;
-                self.device.destroy_pipeline_cache(pipeline_cache);
+                    .expect("merge_pipeline_caches failed");
+                device.destroy_pipeline_cache(pipeline_cache);
             }
         } else {
             self.pipeline_cache = Some(pipeline_cache);
@@ -1177,6 +1179,8 @@ impl<B: hal::Backend> Device<B> {
         shader_kind: &ShaderKind,
         features: &[&str],
     ) -> Result<ProgramId, ShaderError> {
+        let device = self.device.as_ref().unwrap();
+
         let mut name = String::from(shader_name);
         for feature_names in features {
             for feature in feature_names.split(',') {
@@ -1188,11 +1192,11 @@ impl<B: hal::Backend> Device<B> {
 
         if !self.pipeline_layouts.contains_key(shader_kind) {
             let layout = unsafe {
-                self.device.create_pipeline_layout(
+                device.create_pipeline_layout(
                     Some(self.descriptor_pools[self.next_id].get_layout(shader_kind))
                         .into_iter()
-                        .chain(Some(self.descriptor_pools_global.get_layout(shader_kind)))
-                        .chain(Some(self.descriptor_pools_sampler.get_layout(shader_kind))),
+                        .chain(Some(self.descriptor_pools_global.as_ref().unwrap().get_layout(shader_kind)))
+                        .chain(Some(self.descriptor_pools_sampler.as_ref().unwrap().get_layout(shader_kind))),
                     &[],
                 )
             }
@@ -1204,9 +1208,9 @@ impl<B: hal::Backend> Device<B> {
                 .get(&name)
                 .expect(&format!("Can't load pipeline data for: {}!", name))
                 .clone(),
-            &self.device,
+            device,
             &self.pipeline_layouts[shader_kind],
-            &mut self.heaps,
+            self.heaps.as_mut().unwrap(),
             &self.limits,
             &name,
             features,
@@ -1245,6 +1249,7 @@ impl<B: hal::Backend> Device<B> {
     pub fn bind_textures(&mut self) {
         debug_assert!(self.inside_frame);
         assert_ne!(self.bound_program, INVALID_PROGRAM_ID);
+        let device = self.device.as_ref().unwrap();
         let program = self
             .programs
             .get_mut(&self.bound_program)
@@ -1252,17 +1257,17 @@ impl<B: hal::Backend> Device<B> {
         let desc_set = self.descriptor_pools[self.next_id].get(&program.shader_kind);
         for &(index, sampler_name) in SAMPLERS[0 .. 5].iter() {
             program.bind_texture(
-                &self.device,
+                device,
                 desc_set,
                 &self.images[&self.bound_textures[index]].core,
                 sampler_name,
             );
         }
-        let desc_set = self.descriptor_pools_global.get(&program.shader_kind);
+        let desc_set = self.descriptor_pools_global.as_ref().unwrap().get(&program.shader_kind);
         for &(index, sampler_name) in SAMPLERS[5 .. 11].iter() {
             if self.bound_textures[index] != program.bound_textures[index] {
                 program.bind_texture(
-                    &self.device,
+                    device,
                     desc_set,
                     &self.images[&self.bound_textures[index]].core,
                     sampler_name,
@@ -1273,13 +1278,18 @@ impl<B: hal::Backend> Device<B> {
     }
 
     fn bind_samplers(&self, program: &Program<B>) {
-        let desc_set = self.descriptor_pools_sampler.get(&program.shader_kind);
+        let desc_set = self.descriptor_pools_sampler.as_ref().unwrap().get(&program.shader_kind);
         for &(index, sampler_name) in SAMPLERS.iter() {
             let sampler = match self.bound_sampler[index] {
                 TextureFilter::Linear | TextureFilter::Trilinear => &self.sampler_linear,
                 TextureFilter::Nearest => &self.sampler_nearest,
             };
-            program.bind_sampler(&self.device, desc_set, &sampler, sampler_name);
+            program.bind_sampler(
+                self.device.as_ref().unwrap(),
+                desc_set,
+                sampler.as_ref().unwrap(),
+                sampler_name,
+            );
         }
     }
 
@@ -1292,7 +1302,11 @@ impl<B: hal::Backend> Device<B> {
             .expect("Program not found.");
 
         if let Some(ref mut index_buffer) = program.index_buffer {
-            index_buffer[self.next_id].update(&self.device, indices, &mut self.heaps);
+            index_buffer[self.next_id].update(
+                self.device.as_ref().unwrap(),
+                indices,
+                self.heaps.as_mut().unwrap(),
+            );
         } else {
             warn!("This function is for debug shaders only!");
         }
@@ -1307,7 +1321,7 @@ impl<B: hal::Backend> Device<B> {
             .expect("Program not found.");
 
         if program.shader_kind.is_debug() {
-            program.vertex_buffer[self.next_id].update(&self.device, vertices, &mut self.heaps);
+            program.vertex_buffer[self.next_id].update(self.device.as_ref().unwrap(), vertices, self.heaps.as_mut().unwrap());
         } else {
             warn!("This function is for debug shaders only!");
         }
@@ -1323,8 +1337,8 @@ impl<B: hal::Backend> Device<B> {
             .expect("Program not found.");
         let desc_set = &self.descriptor_pools[self.next_id].get(&program.shader_kind);
         program.bind_locals(
-            &self.device,
-            &mut self.heaps,
+            self.device.as_ref().unwrap(),
+            self.heaps.as_mut().unwrap(),
             desc_set,
             transform,
             self.program_mode_id,
@@ -1337,7 +1351,12 @@ impl<B: hal::Backend> Device<B> {
         self.programs
             .get_mut(&self.bound_program)
             .expect("Program not found.")
-            .bind_instances(&self.device, &mut self.heaps, instances, self.next_id);
+            .bind_instances(
+                self.device.as_ref().unwrap(),
+                self.heaps.as_mut().unwrap(),
+                instances,
+                self.next_id,
+            );
     }
 
     fn draw(&mut self) {
@@ -1374,8 +1393,8 @@ impl<B: hal::Backend> Device<B> {
                 rp,
                 &fb,
                 &mut self.descriptor_pools[self.next_id],
-                &self.descriptor_pools_global,
-                &self.descriptor_pools_sampler,
+                self.descriptor_pools_global.as_ref().unwrap(),
+                self.descriptor_pools_sampler.as_ref().unwrap(),
                 &vec![],
                 self.current_blend_state.get(),
                 self.blend_color.get(),
@@ -1384,7 +1403,7 @@ impl<B: hal::Backend> Device<B> {
                 self.next_id,
                 &self.pipeline_layouts,
                 &self.pipeline_requirements,
-                &self.device,
+                self.device.as_ref().unwrap(),
             );
     }
 
@@ -1651,8 +1670,8 @@ impl<B: hal::Backend> Device<B> {
             ),
         };
         let img = Image::new(
-            &self.device,
-            &mut self.heaps,
+            self.device.as_ref().unwrap(),
+            self.heaps.as_mut().unwrap(),
             texture.format,
             texture.size.width,
             texture.size.height,
@@ -1708,7 +1727,7 @@ impl<B: hal::Backend> Device<B> {
 
         for i in 0 .. texture.layer_count as u16 {
             let fbo = Framebuffer::new(
-                &self.device,
+                self.device.as_ref().unwrap(),
                 &texture,
                 &self.images.get(&texture.id).unwrap(),
                 i,
@@ -1953,8 +1972,8 @@ impl<B: hal::Backend> Device<B> {
         } else {
             let rbo_id = self.generate_rbo_id();
             let rbo = DepthBuffer::new(
-                &self.device,
-                &mut self.heaps,
+                self.device.as_ref().unwrap(),
+                self.heaps.as_mut().unwrap(),
                 dimensions.width as _,
                 dimensions.height as _,
                 self.depth_format,
@@ -1980,7 +1999,7 @@ impl<B: hal::Backend> Device<B> {
         if entry.get().refcount == 0 {
             let t = entry.remove();
             let old_rbo = self.rbos.remove(&t.rbo_id).unwrap();
-            old_rbo.deinit(&self.device, &mut self.heaps);
+            old_rbo.deinit(self.device.as_ref().unwrap(), self.heaps.as_mut().unwrap());
             record_gpu_free(depth_target_size_in_bytes(&dimensions));
         }
     }
@@ -2197,11 +2216,13 @@ impl<B: hal::Backend> Device<B> {
             self.release_depth_target(texture.get_dimensions());
         }
 
+        let device = self.device.as_ref().unwrap();
+
         if !texture.fbos_with_depth.is_empty() {
             for old in texture.fbos_with_depth.drain(..) {
                 debug_assert!(self.bound_draw_fbo != old || self.bound_read_fbo != old);
                 let old_fbo = self.fbos.remove(&old).unwrap();
-                old_fbo.deinit(&self.device);
+                old_fbo.deinit(device);
             }
         }
 
@@ -2209,13 +2230,13 @@ impl<B: hal::Backend> Device<B> {
             for old in texture.fbos.drain(..) {
                 debug_assert!(self.bound_draw_fbo != old || self.bound_read_fbo != old);
                 let old_fbo = self.fbos.remove(&old).unwrap();
-                old_fbo.deinit(&self.device);
+                old_fbo.deinit(device);
             }
         }
 
         let image = self.images.remove(&texture.id).expect("Texture not found.");
         record_gpu_free(texture.size_in_bytes());
-        image.deinit(&self.device, &mut self.heaps);
+        image.deinit(device, self.heaps.as_mut().unwrap());
     }
 
     fn delete_retained_textures(&mut self) {
@@ -2283,7 +2304,7 @@ impl<B: hal::Backend> Device<B> {
                 .get_mut(&texture.id)
                 .expect("Texture not found.")
                 .update(
-                    &self.device,
+                    self.device.as_ref().unwrap(),
                     &mut self.command_pool[self.next_id],
                     &mut self.staging_buffer_pool[self.next_id],
                     DeviceIntRect::new(DeviceIntPoint::new(0, 0), texture.size),
@@ -2318,6 +2339,8 @@ impl<B: hal::Backend> Device<B> {
         output: &mut [u8],
     ) {
         self.wait_for_resources();
+
+        let device = self.device.as_ref().unwrap();
 
         let bytes_per_pixel = match read_format {
             ReadPixelsFormat::Standard(imf) => imf.bytes_per_pixel(),
@@ -2356,8 +2379,8 @@ impl<B: hal::Backend> Device<B> {
         };
 
         let mut download_buffer: Buffer<B> = Buffer::new(
-            &self.device,
-            &mut self.heaps,
+            device,
+            self.heaps.as_mut().unwrap(),
             MemoryUsageValue::Download,
             hal::buffer::Usage::TRANSFER_DST,
             (self.limits.optimal_buffer_copy_pitch_alignment - 1) as usize,
@@ -2366,8 +2389,8 @@ impl<B: hal::Backend> Device<B> {
         );
 
         let mut command_pool = unsafe {
-            self.device.create_command_pool_typed(
-                &self.queue_group,
+            device.create_command_pool_typed(
+                self.queue_group.as_ref().unwrap(),
                 hal::pool::CommandPoolCreateFlags::empty(),
             )
         }
@@ -2436,21 +2459,24 @@ impl<B: hal::Backend> Device<B> {
             cmd_buffer.finish();
         }
 
-        let mut copy_fence = self
-            .device
+        let mut copy_fence = device
             .create_fence(false)
             .expect("create_fence failed");
 
+        let device = self.device.as_ref().unwrap();
+        let queue_group = self.queue_group.as_mut().unwrap();
+
         unsafe {
-            self.device
+            device
                 .reset_fence(&copy_fence)
                 .expect("reset_fence failed");
-            self.queue_group.queues[0]
+            queue_group
+                .queues[0]
                 .submit_nosemaphores(Some(&cmd_buffer), Some(&mut copy_fence));
-            self.device
+            device
                 .wait_for_fence(&copy_fence, !0)
                 .expect("wait_for_fence failed");
-            self.device.destroy_fence(copy_fence);
+            device.destroy_fence(copy_fence);
         }
 
         let mut data = vec![0; download_buffer.buffer_size];
@@ -2460,12 +2486,12 @@ impl<B: hal::Backend> Device<B> {
             unsafe {
                 let mut mapped = download_buffer
                     .memory_block
-                    .map(&self.device, range.clone())
+                    .map(device, range.clone())
                     .expect("Mapping memory block failed");
-                let slice = mapped.read(&self.device, range).expect("Read failed");
+                let slice = mapped.read(device, range).expect("Read failed");
                 f32_data[0 .. slice.len()].copy_from_slice(&slice);
             }
-            download_buffer.memory_block.unmap(&self.device);
+            download_buffer.memory_block.unmap(device);
             for i in 0 .. f32_data.len() {
                 data[i] = round_to_int(f32_data[i].min(0f32).max(1f32));
             }
@@ -2473,12 +2499,12 @@ impl<B: hal::Backend> Device<B> {
             unsafe {
                 let mut mapped = download_buffer
                     .memory_block
-                    .map(&self.device, range.clone())
+                    .map(device, range.clone())
                     .expect("Mapping memory block failed");
-                let slice = mapped.read(&self.device, range).expect("Read failed");
+                let slice = mapped.read(device, range).expect("Read failed");
                 data[0 .. slice.len()].copy_from_slice(&slice);
             }
-            download_buffer.memory_block.unmap(&self.device);
+            download_buffer.memory_block.unmap(device);
         }
         data.truncate(output.len());
         if !capture_read && self.surface_format == ImageFormat::BGRA8 {
@@ -2500,10 +2526,10 @@ impl<B: hal::Backend> Device<B> {
             output.swap_with_slice(&mut data);
         }
 
-        download_buffer.deinit(&self.device, &mut self.heaps);
+        download_buffer.deinit(device, self.heaps.as_mut().unwrap());
         unsafe {
             command_pool.reset();
-            self.device.destroy_command_pool(command_pool.into_raw());
+            device.destroy_command_pool(command_pool.into_raw());
         }
     }
 
@@ -2969,7 +2995,7 @@ impl<B: hal::Backend> Device<B> {
                 Some(swap_chain) => {
                     match swap_chain.acquire_image(
                         !0,
-                        Some(&mut self.image_available_semaphore),
+                        Some(self.image_available_semaphore.as_mut().unwrap()),
                         None,
                     ) {
                         Ok(id) => {
@@ -3014,26 +3040,28 @@ impl<B: hal::Backend> Device<B> {
                     let submission = Submission {
                         command_buffers: self.command_pool[self.next_id].command_buffers(),
                         wait_semaphores: Some((
-                            &self.image_available_semaphore,
+                            self.image_available_semaphore.as_ref().unwrap(),
                             PipelineStage::BOTTOM_OF_PIPE,
                         )),
-                        signal_semaphores: Some(&self.render_finished_semaphore),
+                        signal_semaphores: Some(self.render_finished_semaphore.as_ref().unwrap()),
                     };
-                    self.queue_group.queues[0]
-                        .submit(submission, Some(&mut self.frame_fence[self.next_id].inner));
+                    self.queue_group
+                        .as_mut().unwrap()
+                        .queues[0]
+                        .submit(submission, Some(&self.frame_fence[self.next_id].inner));
                     self.frame_fence[self.next_id].is_submitted = true;
 
                     // present frame
                     swap_chain
                         .present(
-                            &mut self.queue_group.queues[0],
+                            &mut self.queue_group.as_mut().unwrap().queues[0],
                             self.current_frame_id as _,
-                            Some(&self.render_finished_semaphore),
+                            Some(self.render_finished_semaphore.as_ref().unwrap()),
                         )
                         .is_err()
                 }
                 None => {
-                    self.queue_group.queues[0].submit_nosemaphores(
+                    self.queue_group.as_mut().unwrap().queues[0].submit_nosemaphores(
                         self.command_pool[self.next_id].command_buffers(),
                         Some(&mut self.frame_fence[self.next_id].inner),
                     );
@@ -3046,14 +3074,13 @@ impl<B: hal::Backend> Device<B> {
         self.next_id = (self.next_id + 1) % self.frame_count;
         self.reset_state();
         if self.frame_fence[self.next_id].is_submitted {
+            let device = self.device.as_ref().unwrap();
             unsafe {
-                self.device
-                    .wait_for_fence(&self.frame_fence[self.next_id].inner, !0)
+                device.wait_for_fence(&self.frame_fence[self.next_id].inner, !0)
             }
             .expect("wait_for_fence failed");
             unsafe {
-                self.device
-                    .reset_fence(&self.frame_fence[self.next_id].inner)
+                device.reset_fence(&self.frame_fence[self.next_id].inner)
             }
             .expect("reset_fence failed");
             self.frame_fence[self.next_id].is_submitted = false;
@@ -3062,7 +3089,7 @@ impl<B: hal::Backend> Device<B> {
             self.command_pool[self.next_id].reset();
         }
         self.staging_buffer_pool[self.next_id].reset();
-        self.descriptor_pools[self.next_id].reset(&self.device);
+        self.descriptor_pools[self.next_id].reset(self.device.as_ref().unwrap());
         self.reset_program_buffer_offsets();
         self.delete_retained_textures();
         return !present_error;
@@ -3074,11 +3101,13 @@ impl<B: hal::Backend> Device<B> {
     }
 
     fn wait_for_resources(&mut self) {
+        let device = self.device.as_ref().unwrap();
+
         for fence in &mut self.frame_fence {
             if fence.is_submitted {
-                unsafe { self.device.wait_for_fence(&fence.inner, !0) }
+                unsafe { device.wait_for_fence(&fence.inner, !0) }
                     .expect("wait_for_fence failed");
-                unsafe { self.device.reset_fence(&fence.inner) }.expect("reset_fence failed");
+                unsafe { device.reset_fence(&fence.inner) }.expect("reset_fence failed");
                 fence.is_submitted = false;
             }
         }
@@ -3098,35 +3127,37 @@ impl<B: hal::Backend> Device<B> {
         }
         report
     }
+}
 
-    pub fn deinit(mut self) {
-        self.device.wait_idle().unwrap();
-        for mut texture in self.retained_textures {
+impl<B: hal::Backend> Drop for Device<B> {
+    fn drop(&mut self) {
+        let device = self.device.take().unwrap();
+        let mut heaps = self.heaps.take().unwrap();
+
+        device.wait_idle().unwrap();
+        for mut texture in self.retained_textures.iter_mut() {
             texture.id = 0;
         }
         unsafe {
             if self.save_cache && self.cache_path.is_some() {
-                let pipeline_cache = self
-                    .device
+                let pipeline_cache = device
                     .create_pipeline_cache(None)
                     .expect("Failed to create pipeline cache");
                 let data;
-                if let Some(cache) = self.pipeline_cache {
-                    self.device
+                if let Some(cache) = self.pipeline_cache.take() {
+                    device
                         .merge_pipeline_caches(&cache, Some(&pipeline_cache))
                         .expect("merge_pipeline_caches failed");
-                    data = self
-                        .device
+                    data = device
                         .get_pipeline_cache_data(&cache)
                         .expect("get_pipeline_cache_data failed");
-                    self.device.destroy_pipeline_cache(cache);
+                    device.destroy_pipeline_cache(cache);
                 } else {
-                    data = self
-                        .device
+                    data = device
                         .get_pipeline_cache_data(&pipeline_cache)
                         .expect("get_pipeline_cache_data failed");
                 };
-                self.device.destroy_pipeline_cache(pipeline_cache);
+                device.destroy_pipeline_cache(pipeline_cache);
 
                 if data.len() > 0 {
                     let mut file = OpenOptions::new()
@@ -3139,71 +3170,69 @@ impl<B: hal::Backend> Device<B> {
                     file.write(&data).expect("File write failed");
                 }
             } else {
-                if let Some(cache) = self.pipeline_cache {
-                    self.device.destroy_pipeline_cache(cache);
+                if let Some(cache) = self.pipeline_cache.take() {
+                    device.destroy_pipeline_cache(cache);
                 }
             }
 
-            for command_pool in self.command_pool {
-                command_pool.destroy(&self.device);
+            for command_pool in self.command_pool.drain() {
+                command_pool.destroy(&device);
             }
-            for mut staging_buffer_pool in self.staging_buffer_pool {
-                staging_buffer_pool.deinit(&self.device, &mut self.heaps);
+            for mut staging_buffer_pool in self.staging_buffer_pool.drain() {
+                staging_buffer_pool.deinit(&device, &mut heaps);
             }
-            for image in self.frame_images {
-                image.deinit(&self.device, &mut self.heaps);
+            for image in self.frame_images.drain(..) {
+                image.deinit(&device, &mut heaps);
             }
-            for depth in self.frame_depths {
-                depth.deinit(&self.device, &mut self.heaps);
+            for depth in self.frame_depths.drain(..) {
+                depth.deinit(&device, &mut heaps);
             }
-            for (_, image) in self.images {
-                image.deinit(&self.device, &mut self.heaps);
+            for (_, image) in self.images.drain() {
+                image.deinit(&device, &mut heaps);
             }
-            for (_, rbo) in self.fbos {
-                rbo.deinit(&self.device);
+            for (_, rbo) in self.fbos.drain() {
+                rbo.deinit(&device);
             }
-            for (_, rbo) in self.rbos {
-                rbo.deinit(&self.device, &mut self.heaps);
+            for (_, rbo) in self.rbos.drain() {
+                rbo.deinit(&device, &mut heaps);
             }
-            for framebuffer in self.framebuffers {
-                self.device.destroy_framebuffer(framebuffer);
+            for framebuffer in self.framebuffers.drain(..) {
+                device.destroy_framebuffer(framebuffer);
             }
-            for framebuffer_depth in self.framebuffers_depth {
-                self.device.destroy_framebuffer(framebuffer_depth);
+            for framebuffer_depth in self.framebuffers_depth.drain(..) {
+                device.destroy_framebuffer(framebuffer_depth);
             }
-            self.device.destroy_sampler(self.sampler_linear);
-            self.device.destroy_sampler(self.sampler_nearest);
-            for descriptor_pool in self.descriptor_pools {
-                descriptor_pool.deinit(&self.device);
+            device.destroy_sampler(self.sampler_linear.take().unwrap());
+            device.destroy_sampler(self.sampler_nearest.take().unwrap());
+            for descriptor_pool in self.descriptor_pools.drain() {
+                descriptor_pool.deinit(&device);
             }
-            self.descriptor_pools_global.deinit(&self.device);
-            self.descriptor_pools_sampler.deinit(&self.device);
-            for (_, program) in self.programs {
-                program.deinit(&self.device, &mut self.heaps)
+            self.descriptor_pools_global.take().unwrap().deinit(&device);
+            self.descriptor_pools_sampler.take().unwrap().deinit(&device);
+            for (_, program) in self.programs.drain() {
+                program.deinit(&device, &mut heaps)
             }
-            self.heaps.dispose(&self.device);
-            for (_, (vs_module, fs_module)) in self.shader_modules {
-                self.device.destroy_shader_module(vs_module);
-                self.device.destroy_shader_module(fs_module);
+            heaps.dispose(&device);
+            for (_, (vs_module, fs_module)) in self.shader_modules.drain() {
+                device.destroy_shader_module(vs_module);
+                device.destroy_shader_module(fs_module);
             }
-            for (_, layout) in self.pipeline_layouts {
-                self.device.destroy_pipeline_layout(layout);
+            for (_, layout) in self.pipeline_layouts.drain() {
+                device.destroy_pipeline_layout(layout);
             }
-            self.render_pass.unwrap().deinit(&self.device);
-            for fence in self.frame_fence {
-                self.device.destroy_fence(fence.inner);
+            self.render_pass.take().unwrap().deinit(&device);
+            for fence in self.frame_fence.drain() {
+                device.destroy_fence(fence.inner);
             }
-            self.device
-                .destroy_semaphore(self.image_available_semaphore);
-            self.device
-                .destroy_semaphore(self.render_finished_semaphore);
-            if let Some(swap_chain) = self.swap_chain {
-                self.device.destroy_swapchain(swap_chain);
+            device.destroy_semaphore(self.image_available_semaphore.take().unwrap());
+            device.destroy_semaphore(self.render_finished_semaphore.take().unwrap());
+            if let Some(swap_chain) = self.swap_chain.take() {
+                device.destroy_swapchain(swap_chain);
             }
         }
         // We must ensure these are dropped before `self._instance` or we segfault with Vulkan
-        mem::drop(self.device);
-        mem::drop(self.queue_group);
+        mem::drop(device);
+        self.queue_group.take();
     }
 }
 
@@ -3282,7 +3311,7 @@ impl<'a, B: hal::Backend> TextureUploader<'a, B> {
             .get_mut(&self.texture.id)
             .expect("Texture not found.")
             .update(
-                &self.device.device,
+                self.device.device.as_ref().unwrap(),
                 &mut self.device.command_pool[self.device.next_id],
                 &mut self.device.staging_buffer_pool[self.device.next_id],
                 rect,
