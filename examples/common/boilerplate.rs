@@ -352,8 +352,8 @@ pub fn main_wrapper<E: Example>(
                 event: winit::WindowEvent::Resized(dims),
                 ..
             } => {
-                let new_size = DeviceIntSize::new((dims.width as f32 * device_pixel_ratio) as i32, (dims.height as f32 * device_pixel_ratio) as i32);
-                framebuffer_size = new_size;
+                //let new_size = DeviceIntSize::new((dims.width as f32 * device_pixel_ratio) as i32, (dims.height as f32 * device_pixel_ratio) as i32);
+                framebuffer_size = renderer.resize(None);
                 layout_size = framebuffer_size.to_f32() / euclid::TypedScale::new(device_pixel_ratio);
                 api.set_window_parameters(
                     document_id,

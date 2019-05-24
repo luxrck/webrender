@@ -1917,7 +1917,7 @@ impl<B: hal::Backend> Renderer<B> {
     }
 
     #[cfg(not(feature = "gleam"))]
-    fn resize(&mut self, window_size: Option<(i32, i32)>) -> DeviceIntSize {
+    pub fn resize(&mut self, window_size: Option<(i32, i32)>) -> DeviceIntSize {
         self.shaders.borrow_mut().reset();
         let size = self.device.recreate_swapchain(window_size);
         if let Some(debug_renderer) = self.debug.take() {
@@ -2431,7 +2431,8 @@ impl<B: hal::Backend> Renderer<B> {
             #[cfg(not(feature="gleam"))]
             {
                 if !self.device.submit_to_gpu() {
-                    self.resize(None);
+                    println!("GPU");
+                    /* self.resize(None); */
                 }
             }
             self.device.end_frame();

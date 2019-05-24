@@ -44,7 +44,7 @@ use super::super::super::shader_source;
 use hal;
 use hal::pso::{BlendState, DepthTest};
 use hal::{Device as BackendDevice, PhysicalDevice, Surface, Swapchain};
-use hal::{SwapchainConfig};
+use hal::{SwapchainConfig, AcquireError};
 use hal::pso::PipelineStage;
 use hal::queue::Submission;
 use hal::window::PresentError;
@@ -331,6 +331,7 @@ impl<B: hal::Backend> Device<B> {
                     &adapter,
                     surface,
                     Some(window_size),
+                    None,
                 );
                 (
                     Some(swap_chain),
@@ -599,10 +600,6 @@ impl<B: hal::Backend> Device<B> {
             viewport,
             _frame_count,
         ) = if let Some (ref mut surface) = self.surface {
-            unsafe {
-                self.device
-                    .destroy_swapchain(self.swap_chain.take().unwrap());
-            }
             let (
                 swap_chain,
                 surface_format,
@@ -620,6 +617,7 @@ impl<B: hal::Backend> Device<B> {
                 &self.adapter,
                 surface,
                 window_size,
+                self.swap_chain.take(),
             );
             (
                 Some(swap_chain),
@@ -690,6 +688,7 @@ impl<B: hal::Backend> Device<B> {
         adapter: &hal::Adapter<B>,
         surface: &mut B::Surface,
         window_size: Option<(i32, i32)>,
+        old_swap_chain: Option<B::Swapchain>,
     ) -> (
         B::Swapchain,
         ImageFormat,
@@ -717,21 +716,16 @@ impl<B: hal::Backend> Device<B> {
                 .find(|format| format == &hal::format::Format::Bgra8Unorm)
                 .expect("Bgra8Unorm surface is not supported!")
         });
-
-        let window_size = window_size.unwrap_or((0,0));
-        let mut extent = if window_size == (0,0) {
-            caps.current_extent.unwrap()
-        } else {
+        let ext = (caps.current_extent.unwrap().width as i32, caps.current_extent.unwrap().height as i32);
+        let mut extent =
             hal::window::Extent2D {
-                width: (window_size.0 as u32)
-                    .min(caps.extents.start.width)
-                    .max(caps.extents.end.width),
-
-                height: (window_size.1 as u32)
-                    .min(caps.extents.start.height)
-                    .max(caps.extents.end.height),
-            }
-        };
+                width: window_size.unwrap_or(ext).0
+                        .min(caps.extents.end.width as i32)
+                        .max(caps.extents.start.width as i32) as u32,
+                height: window_size.unwrap_or(ext).1
+                        .min(caps.extents.end.height as i32)
+                        .max(caps.extents.start.height as i32) as u32,
+            };
 
         if extent.width == 0 {
             extent.width = 1;
@@ -759,7 +753,7 @@ impl<B: hal::Backend> Device<B> {
         }
 
         let (swap_chain, images) =
-            unsafe { device.create_swapchain(surface, swap_config, None) }
+            unsafe { device.create_swapchain(surface, swap_config, old_swap_chain) }
                 .expect("create_swapchain failed");
         let depth_format = hal::format::Format::D32Sfloat; //maybe d24s8?
 
@@ -3120,6 +3114,7 @@ impl<B: hal::Backend> Device<B> {
     }
 
     pub fn set_next_frame_id(&mut self) -> bool {
+        let mut need_to_recreate_swapchain = false;
         unsafe {
             match self.swap_chain.as_mut() {
                 Some(swap_chain) => {
@@ -3163,7 +3158,6 @@ impl<B: hal::Backend> Device<B> {
                                 );
                             }
                             cmd_buffer.finish();
-                            true
                         }
                         Err(acq_err) => {
                             match acq_err {
@@ -3173,16 +3167,19 @@ impl<B: hal::Backend> Device<B> {
                                 AcquireError::DeviceLost(dev) => {warn!("AcquireError : DeviceLost => {:?}", dev)},
                                 AcquireError::OutOfMemory(mem) => {warn!("AcquireError : OutOfMemory => {:?}", mem)}
                             }
-                            true
+                            need_to_recreate_swapchain = true;
                         },
                     }
                 }
                 None => {
                     self.current_frame_id = (self.current_frame_id + 1) % self.frame_count;
-                    true
                 }
             }
         }
+        if need_to_recreate_swapchain {
+            //self.recreate_swapchain(None);
+        };
+        true
     }
 
     pub fn submit_to_gpu(&mut self) -> bool {
@@ -3239,14 +3236,13 @@ impl<B: hal::Backend> Device<B> {
                             }
                             Err(presenterr) => {
                                 match presenterr {
-                                    PresentError::OutOfDate => {
-                                        need_to_recreate_swapchain = true;
-                                        false
-                                    },
-                                    PresentError::SurfaceLost(surf) => {warn!("PresentError : SurfaceLost => {:?}", surf); true},
-                                    PresentError::DeviceLost(dev) => {warn!("PresentError : DeviceLost => {:?}", dev); true},
-                                    PresentError::OutOfMemory(mem) => {warn!("PresentError : OutOfMemory => {:?}", mem); true}
+                                    PresentError::OutOfDate => { warn!("PresentError : OutOfDate")},
+                                    PresentError::SurfaceLost(surf) => {warn!("PresentError : SurfaceLost => {:?}", surf)},
+                                    PresentError::DeviceLost(dev) => {warn!("PresentError : DeviceLost => {:?}", dev)},
+                                    PresentError::OutOfMemory(mem) => {warn!("PresentError : OutOfMemory => {:?}", mem)}
                                 }
+                                need_to_recreate_swapchain = true;
+                                false
                             }
                         }
                 }
@@ -3285,7 +3281,8 @@ impl<B: hal::Backend> Device<B> {
         self.reset_program_buffer_offsets();
         self.delete_retained_textures();
         if need_to_recreate_swapchain {
-            self.recreate_swapchain(None);
+            let a = self.viewport_size();
+            self.recreate_swapchain(Some((a.width, a.height)));
         };
         return !present_error;
     }
