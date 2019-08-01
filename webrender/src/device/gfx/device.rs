@@ -1825,19 +1825,19 @@ impl<B: hal::Backend> Device<B> {
         self.bound_gpu_cache = texture.id;
         let ref buffer = self.gpu_cache_buffers[&self.bound_gpu_cache];
         let cmd_buffer = self.command_pool[self.next_id].command_buffer_mut();
-        if let Some(barrier) = buffer.transit(hal::buffer::Access::HOST_WRITE | hal::buffer::Access::HOST_READ) {
+        if let Some(barrier) = buffer.transit(hal::buffer::Access::SHADER_READ, true) {
             unsafe {
                 cmd_buffer.pipeline_barrier(
-                    PS::VERTEX_SHADER | PS::FRAGMENT_SHADER .. PS::HOST,
+                    PS::HOST .. PS::VERTEX_SHADER | PS::FRAGMENT_SHADER,
                     hal::memory::Dependencies::empty(),
                     &[barrier],
                 );
             }
         }
-        if let Some(barrier) = buffer.transit(hal::buffer::Access::SHADER_READ) {
+        if let Some(barrier) = buffer.transit(hal::buffer::Access::HOST_WRITE | hal::buffer::Access::HOST_READ, false) {
             unsafe {
                 cmd_buffer.pipeline_barrier(
-                    PS::HOST .. PS::VERTEX_SHADER | PS::FRAGMENT_SHADER,
+                    PS::VERTEX_SHADER | PS::FRAGMENT_SHADER .. PS::HOST,
                     hal::memory::Dependencies::empty(),
                     &[barrier],
                 );
@@ -2045,6 +2045,7 @@ impl<B: hal::Backend> Device<B> {
             size: buffer_req.size,
             state: Cell::new(hal::buffer::Access::empty()),
             non_coherent_atom_size_mask,
+            transit_range_end: 0,
         }
     }
 
@@ -2068,10 +2069,15 @@ impl<B: hal::Backend> Device<B> {
     }
 
     pub fn flush_mapped_ranges(
-        &self,
+        &mut self,
         ranges: impl Iterator<Item = std::ops::Range<u64>>,
     ) {
-        unsafe { self.gpu_cache_buffers[&self.bound_gpu_cache].flush_mapped_ranges(&self.device, ranges) };
+        unsafe {
+            self.gpu_cache_buffers
+                .get_mut(&self.bound_gpu_cache)
+                .unwrap()
+                .flush_mapped_ranges(&self.device, ranges)
+        };
     }
 
     pub fn create_gpu_cache_texture(
@@ -2100,7 +2106,7 @@ impl<B: hal::Backend> Device<B> {
 
         self.bound_gpu_cache = texture.id;
         let buffer = self.create_cache_buffer(width as u64, height as u64);
-        if let Some(barrier) = buffer.transit(hal::buffer::Access::HOST_WRITE | hal::buffer::Access::HOST_READ) {
+        if let Some(barrier) = buffer.transit(hal::buffer::Access::HOST_WRITE | hal::buffer::Access::HOST_READ, false) {
             use hal::pso::PipelineStage as PS;
             let cmd_buffer = self.command_pool[self.next_id].command_buffer_mut();
             unsafe {
@@ -2258,7 +2264,8 @@ impl<B: hal::Backend> Device<B> {
         let mut src_buffer = self.gpu_cache_buffers.remove(&src.id).unwrap();
         {
             let dst_buffer = self.gpu_cache_buffers.get_mut(&dst.id).unwrap();
-            let (read_mapping, read_size) = src_buffer.map(&self.device, None);
+            let read_size = src_buffer.transit_range_end;
+            let (read_mapping, _) = src_buffer.map(&self.device, None);
             unsafe {
                 let (write_mapping, _) = dst_buffer.map(&self.device, Some(read_size));
                 let src_slice = slice::from_raw_parts(read_mapping.ptr().as_ptr() as _, read_size as usize);

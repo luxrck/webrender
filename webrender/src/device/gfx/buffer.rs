@@ -20,6 +20,7 @@ pub(super) struct PMBuffer<B: hal::Backend> {
     pub size: u64,
     pub state: Cell<hal::buffer::State>,
     pub non_coherent_atom_size_mask: u64,
+    pub transit_range_end: u64,
 }
 
 impl<B: hal::Backend> PMBuffer<B> {
@@ -33,21 +34,28 @@ impl<B: hal::Backend> PMBuffer<B> {
     }
 
     pub(super) unsafe fn flush_mapped_ranges(
-        &self,
+        &mut self,
         device: &B::Device,
         ranges: impl Iterator<Item=std::ops::Range<u64>>,
     ) {
         if !self.coherent {
+            let mut transit_range_end = self.transit_range_end;
             let mask = self.non_coherent_atom_size_mask;
             let offset = self.memory_block.range().start;
             let max_range = self.size + offset;
             device.flush_mapped_memory_ranges(ranges.into_iter().map(|mut r| {
                     r.start = r.start + offset;
                     r.start = if r.start <= mask { 0 } else { (r.start - mask) & !mask };
+                    transit_range_end = transit_range_end.max(r.end);
                     r.end = ((r.end + offset + mask) & !mask).min(max_range);
                     (self.memory_block.memory(), r)
                 }
             )).expect("Flush mapped memory ranges failed for PMBuffer");
+            self.transit_range_end = transit_range_end;
+        } else {
+            if let Some(max) = ranges.max_by(|x, y| x.end.cmp(&y.end)) {
+                self.transit_range_end = self.transit_range_end.max(max.end);
+            }
         }
     }
 
@@ -58,7 +66,7 @@ impl<B: hal::Backend> PMBuffer<B> {
         }
     }
 
-    pub(super) fn transit(&self, access: hal::buffer::Access) -> Option<hal::memory::Barrier<B>> {
+    pub(super) fn transit(&self, access: hal::buffer::Access, with_range: bool) -> Option<hal::memory::Barrier<B>> {
         let src_state = self.state.get();
         if src_state == access {
             None
@@ -68,7 +76,7 @@ impl<B: hal::Backend> PMBuffer<B> {
                 states: src_state .. access,
                 target: &self.buffer,
                 families: None,
-                range: None .. None,
+                range: None .. if with_range { Some(self.transit_range_end) } else { None },
             })
         }
     }
