@@ -13,7 +13,7 @@ use euclid::Transform3D;
 use gpu_cache::GpuBlockData;
 use internal_types::{FastHashMap, RenderTargetInfo};
 use rand::{self, Rng};
-use rendy_memory::{Block, Heaps, HeapsConfig, MemoryUsageValue};
+use rendy_memory::{Block, Kind, Heaps, HeapsConfig, MemoryUsage ,MemoryUsageValue};
 use rendy_descriptor::{DescriptorAllocator, DescriptorRanges, DescriptorSet};
 use ron::de::from_str;
 use smallvec::SmallVec;
@@ -145,6 +145,32 @@ pub struct VAO;
 struct Fence<B: hal::Backend> {
     inner: B::Fence,
     is_submitted: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PMBufferMemoryUsage;
+impl MemoryUsage for PMBufferMemoryUsage {
+    fn properties_required(&self) -> hal::memory::Properties {
+        hal::memory::Properties::CPU_VISIBLE
+    }
+
+    #[inline]
+    fn memory_fitness(&self, properties: hal::memory::Properties) -> u32 {
+        assert!(properties.contains(hal::memory::Properties::CPU_VISIBLE));
+        assert!(!properties.contains(hal::memory::Properties::LAZILY_ALLOCATED));
+
+        0 | ((!properties.contains(hal::memory::Properties::DEVICE_LOCAL)) as u32) << 1
+            | (properties.contains(hal::memory::Properties::CPU_CACHED) as u32) << 2
+            | (properties.contains(hal::memory::Properties::COHERENT) as u32) << 0
+    }
+
+    fn allocator_fitness(&self, kind: Kind) -> u32 {
+        match kind {
+            Kind::Dedicated => 1,
+            Kind::Dynamic => 2,
+            Kind::Linear => 0,
+        }
+    }
 }
 
 pub struct Device<B: hal::Backend> {
@@ -288,7 +314,7 @@ impl<B: hal::Backend> Device<B> {
                 if let Some(mut linear) = config.linear {
                     if !mt
                         .properties
-                        .contains(gfx_hal::memory::Properties::CPU_VISIBLE)
+                        .contains(hal::memory::Properties::CPU_VISIBLE)
                     {
                         config.linear = None;
                     } else {
@@ -1994,9 +2020,7 @@ impl<B: hal::Backend> Device<B> {
             .allocate(
                 &self.device,
                 buffer_req.type_mask as u32,
-                // The best suitable type from rendy-memory with CPU_CACHED property according to
-                // https://github.com/amethyst/rendy/blob/release-0.2/memory/src/usage.rs#L145
-                MemoryUsageValue::Download,
+                PMBufferMemoryUsage,
                 buffer_req.size,
                 alignment,
             )
