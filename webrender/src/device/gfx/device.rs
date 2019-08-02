@@ -10,6 +10,7 @@ use api::TextureTarget;
 use api::ImageDescriptor;
 use arrayvec::ArrayVec;
 use euclid::Transform3D;
+use gpu_cache::GpuBlockData;
 use internal_types::{FastHashMap, RenderTargetInfo};
 use rand::{self, Rng};
 use rendy_memory::{Block, Heaps, HeapsConfig, MemoryUsageValue};
@@ -1987,6 +1988,8 @@ impl<B: hal::Backend> Device<B> {
             unsafe { self.device.create_buffer(buffer_len, hal::buffer::Usage::STORAGE) }.unwrap();
 
         let buffer_req = unsafe { self.device.get_buffer_requirements(&storage_buffer) };
+        let non_coherent_atom_size_mask = self.limits.non_coherent_atom_size as u64 - 1;
+        let alignment = ((buffer_req.alignment - 1) | (non_coherent_atom_size_mask)) +1;
         let memory_block = self.heaps
             .allocate(
                 &self.device,
@@ -1995,43 +1998,49 @@ impl<B: hal::Backend> Device<B> {
                 // https://github.com/amethyst/rendy/blob/release-0.2/memory/src/usage.rs#L145
                 MemoryUsageValue::Download,
                 buffer_req.size,
-                buffer_req.alignment,
+                alignment,
             )
             .expect("Allocate memory failed");
 
         assert!(memory_block.properties().contains(hal::memory::Properties::CPU_CACHED));
         let coherent = memory_block.properties().contains(hal::memory::Properties::COHERENT);
 
-        let offset = memory_block.range().start;
         unsafe {
             self.device.bind_buffer_memory(
                 &memory_block.memory(),
-                offset,
+                memory_block.range().start,
                 &mut storage_buffer,
             )
         }
         .expect("Bind buffer memory failed");
-        let ptr = unsafe { self.device.map_memory(&memory_block.memory(), offset..offset + buffer_req.size) }.unwrap();
         PMBuffer {
             buffer: storage_buffer,
             memory_block,
-            ptr,
             coherent,
             height,
             size: buffer_req.size,
             state: Cell::new(hal::buffer::Access::empty()),
+            non_coherent_atom_size_mask,
         }
     }
 
-    pub fn create_writer(
+    pub(crate) fn map_gpu_cache_memory<'a>(
+        &'a mut self
+    ) -> &mut [GpuBlockData] {
+        let (mapped_range, size) = self.gpu_cache_buffers
+            .get_mut(&self.bound_gpu_cache)
+            .unwrap()
+            .map(&self.device, None);
+        unsafe { slice::from_raw_parts_mut(mapped_range.ptr().as_ptr() as _, size as usize / mem::size_of::<GpuBlockData>())}
+    }
+
+    pub fn unmap_gpu_cache_memory(
         &mut self
-    ) -> &mut [[f32; 4]] {
-        unsafe {
-            self.gpu_cache_buffers
-                .get_mut(&self.bound_gpu_cache)
-                .expect("Gpu cache not found!")
-                .acquire_host_visible_slice(None)
-        }
+    ) {
+        self.gpu_cache_buffers
+            .get_mut(&self.bound_gpu_cache)
+            .unwrap()
+            .unmap(&self.device)
     }
 
     pub fn flush_mapped_ranges(
@@ -2065,6 +2074,7 @@ impl<B: hal::Backend> Device<B> {
             is_buffer: true,
         };
 
+        self.bound_gpu_cache = texture.id;
         let buffer = self.create_cache_buffer(width as u64, height as u64);
         if let Some(barrier) = buffer.transit(hal::buffer::Access::HOST_WRITE | hal::buffer::Access::HOST_READ) {
             use hal::pso::PipelineStage as PS;
@@ -2223,14 +2233,18 @@ impl<B: hal::Backend> Device<B> {
     pub fn copy_cache_buffer(&mut self, dst: &Texture, src: &Texture) {
         let mut src_buffer = self.gpu_cache_buffers.remove(&src.id).unwrap();
         {
-            let size = src_buffer.size;
             let dst_buffer = self.gpu_cache_buffers.get_mut(&dst.id).unwrap();
+            let (read_mapping, read_size) = src_buffer.map(&self.device, None);
             unsafe {
-                let src_slice = src_buffer.acquire_host_visible_slice(None);
-                let dst_slice = dst_buffer.acquire_host_visible_slice(Some(size));
+                let (write_mapping, _) = dst_buffer.map(&self.device, Some(read_size));
+                let src_slice = slice::from_raw_parts(read_mapping.ptr().as_ptr() as _, read_size as usize);
+                let dst_slice = slice::from_raw_parts_mut(write_mapping.ptr().as_ptr() as _, read_size as usize);
                 dst_slice.copy_from_slice(src_slice);
             }
+            unsafe { dst_buffer.flush_mapped_ranges(&self.device, std::iter::once(0..read_size)) };
+            dst_buffer.unmap(&self.device);
         }
+        src_buffer.unmap(&self.device);
         self.gpu_cache_buffers.insert(src.id, src_buffer);
     }
 

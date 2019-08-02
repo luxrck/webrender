@@ -4,48 +4,54 @@
 
 use hal;
 use hal::Device as BackendDevice;
-use rendy_memory::{Block, Heaps, MemoryBlock, MemoryUsageValue, Write};
+use rendy_memory::{Block, Heaps, MappedRange, MemoryBlock, MemoryUsageValue, Write};
 use smallvec::SmallVec;
 
 use std::cell::Cell;
 use std::mem;
-use std::slice;
 
 pub const DOWNLOAD_BUFFER_SIZE: usize = 10 << 20; // 10MB
 
-pub struct PMBuffer<B: hal::Backend> {
+pub(super) struct PMBuffer<B: hal::Backend> {
     pub buffer: B::Buffer,
     pub memory_block: MemoryBlock<B>,
-    pub ptr: *mut u8,
     pub coherent: bool,
     pub height: u64,
     pub size: u64,
     pub state: Cell<hal::buffer::State>,
+    pub non_coherent_atom_size_mask: u64,
 }
 
 impl<B: hal::Backend> PMBuffer<B> {
-    pub unsafe fn acquire_host_visible_slice(&mut self, size: Option<u64>) -> &mut [[f32; 4]] {
-        let count = size.unwrap_or(self.size) as usize / mem::size_of::<[f32; 4]>();
-        slice::from_raw_parts_mut(self.ptr as *mut _, count)
+    pub(super) fn map<'a>(&'a mut self, device: &B::Device, size: Option<u64>) -> (MappedRange<'a, B>, u64) {
+        let size = size.unwrap_or(self.size);
+        (self.memory_block.map(&device, 0..size).expect("Mapping memory block failed"), size)
     }
 
-    pub unsafe fn flush_mapped_ranges(
+    pub(super) fn unmap(&mut self, device: &B::Device) {
+        self.memory_block.unmap(device);
+    }
+
+    pub(super) unsafe fn flush_mapped_ranges(
         &self,
         device: &B::Device,
         ranges: impl Iterator<Item=std::ops::Range<u64>>,
     ) {
         if !self.coherent {
+            let mask = self.non_coherent_atom_size_mask;
             let offset = self.memory_block.range().start;
+            let max_range = self.size + offset;
             device.flush_mapped_memory_ranges(ranges.into_iter().map(|mut r| {
-                    r.start += offset;
-                    r.end += offset;
+                    r.start = r.start + offset;
+                    r.start = if r.start <= mask { 0 } else { (r.start - mask) & !mask };
+                    r.end = ((r.end + offset + mask) & !mask).min(max_range);
                     (self.memory_block.memory(), r)
                 }
             )).expect("Flush mapped memory ranges failed for PMBuffer");
         }
     }
 
-    pub fn deinit(self, device: &B::Device, heaps: &mut Heaps<B>) {
+    pub(super) fn deinit(self, device: &B::Device, heaps: &mut Heaps<B>) {
         unsafe {
             device.destroy_buffer(self.buffer);
             heaps.free(device, self.memory_block);
