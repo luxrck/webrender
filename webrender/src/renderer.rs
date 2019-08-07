@@ -915,8 +915,16 @@ impl<B: hal::Backend> GpuCacheTexture<B> {
         match self.bus {
             #[cfg(not(feature = "gleam"))]
             GpuCacheBus::PMbuffer { ref mut mapped_ranges } => {
-                {
-                    let mut writer = device.map_gpu_cache_memory();
+                use rendy_memory::Write;
+                unsafe {
+                    let (mut mapped_range, size) =
+                        Device::map_gpu_cache_memory(
+                            &mut device.gpu_cache_buffers,
+                            device.bound_gpu_cache,
+                            &device.device,
+                        );
+                    let mut writer = mapped_range.write::<GpuBlockData>(&device.device, 0..size).unwrap();
+                    let writer_slice = writer.slice();
                     for update in &updates.updates {
                         match *update {
                             GpuCacheUpdate::Copy {
@@ -927,13 +935,13 @@ impl<B: hal::Backend> GpuCacheTexture<B> {
                                 let address = address.v as usize * MAX_VERTEX_TEXTURE_WIDTH + address.u as usize;
                                 mapped_ranges.push(address as u64 * GpuBlockData::SIZE .. (address + block_count) as u64 * GpuBlockData::SIZE);
                                 for i in 0 .. block_count {
-                                    writer[address + i] = updates.blocks[block_index + i];
+                                    writer_slice[address + i] = updates.blocks[block_index + i];
                                 }
                             }
                         }
                     }
                 }
-                device.unmap_gpu_cache_memory();
+                //device.unmap_gpu_cache_memory();
             }
             GpuCacheBus::PixelBuffer { ref mut rows, .. } => {
                 for update in &updates.updates {

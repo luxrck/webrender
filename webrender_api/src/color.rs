@@ -124,10 +124,10 @@ impl ColorU {
 }
 
 pub fn round_to_int(x: f32) -> u8 {
-    debug_assert!((0.0 <= x) && (x <= 1.0));
+    //debug_assert!((0.0 <= x) && (x <= 1.0));
     let f = (255.0 * x) + 0.5;
     let val = f.floor();
-    debug_assert!(val <= 255.0);
+    //debug_assert!(val <= 255.0);
     val as u8
 }
 

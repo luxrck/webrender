@@ -13,7 +13,7 @@ use euclid::Transform3D;
 use gpu_cache::GpuBlockData;
 use internal_types::{FastHashMap, RenderTargetInfo};
 use rand::{self, Rng};
-use rendy_memory::{Block, Kind, Heaps, HeapsConfig, MemoryUsage ,MemoryUsageValue};
+use rendy_memory::{Block, Kind, Heaps, HeapsConfig, MemoryUsage, MappedRange, MemoryUsageValue, Write};
 use rendy_descriptor::{DescriptorAllocator, DescriptorRanges, DescriptorSet};
 use ron::de::from_str;
 use smallvec::SmallVec;
@@ -204,8 +204,8 @@ pub struct Device<B: hal::Backend> {
     programs: FastHashMap<ProgramId, Program<B>>,
     shader_modules: FastHashMap<String, (B::ShaderModule, B::ShaderModule)>,
     images: FastHashMap<TextureId, Image<B>>,
-    bound_gpu_cache: TextureId,
-    gpu_cache_buffers: FastHashMap<TextureId, PMBuffer<B>>,
+    pub bound_gpu_cache: TextureId,
+    pub(crate) gpu_cache_buffers: FastHashMap<TextureId, PMBuffer<B>>,
     retained_textures: Vec<Texture>,
     fbos: FastHashMap<FBOId, Framebuffer<B>>,
     rbos: FastHashMap<RBOId, DepthBuffer<B>>,
@@ -2049,7 +2049,7 @@ impl<B: hal::Backend> Device<B> {
         }
     }
 
-    pub(crate) fn map_gpu_cache_memory<'a>(
+    /*pub(crate) fn map_gpu_cache_memory<'a>(
         &'a mut self
     ) -> &mut [GpuBlockData] {
         let (mapped_range, size) = self.gpu_cache_buffers
@@ -2066,6 +2066,17 @@ impl<B: hal::Backend> Device<B> {
             .get_mut(&self.bound_gpu_cache)
             .unwrap()
             .unmap(&self.device)
+    }*/
+
+    pub(crate) fn map_gpu_cache_memory<'a>(
+        gpu_cache_buffers: &'a mut FastHashMap<TextureId, PMBuffer<B>>,
+        buffer_id: TextureId,
+        device: &'a B::Device,
+    ) -> (MappedRange<'a, B>, u64) {
+        gpu_cache_buffers
+            .get_mut(&buffer_id)
+            .unwrap()
+            .map(device, None)
     }
 
     pub fn flush_mapped_ranges(
@@ -2260,7 +2271,7 @@ impl<B: hal::Backend> Device<B> {
         }
     }
 
-    pub fn copy_cache_buffer(&mut self, dst: &Texture, src: &Texture) {
+    pub fn copy_cache_buffer_ok(&mut self, dst: &Texture, src: &Texture) {
         let mut src_buffer = self.gpu_cache_buffers.remove(&src.id).unwrap();
         {
             let dst_buffer = self.gpu_cache_buffers.get_mut(&dst.id).unwrap();
@@ -2273,6 +2284,25 @@ impl<B: hal::Backend> Device<B> {
                 dst_slice.copy_from_slice(src_slice);
             }
             unsafe { dst_buffer.flush_mapped_ranges(&self.device, std::iter::once(0..read_size)) };
+            dst_buffer.unmap(&self.device);
+        }
+        src_buffer.unmap(&self.device);
+        self.gpu_cache_buffers.insert(src.id, src_buffer);
+    }
+
+    pub fn copy_cache_buffer(&mut self, dst: &Texture, src: &Texture) {
+        let mut src_buffer = self.gpu_cache_buffers.remove(&src.id).unwrap();
+        {
+            let dst_buffer = self.gpu_cache_buffers.get_mut(&dst.id).unwrap();
+            let (mut mapped, read_size) = src_buffer.map(&self.device, None);
+            unsafe {
+                let read_slice = mapped.read::<GpuBlockData>(&self.device, 0..read_size).unwrap();
+                let (mut mapped, _) = dst_buffer.map(&self.device, Some(read_size));
+                let mut writer = mapped.write::<GpuBlockData>(&self.device, 0..read_size).unwrap();
+                let writer_slice = writer.slice();
+
+                writer_slice.copy_from_slice(read_slice);
+            }
             dst_buffer.unmap(&self.device);
         }
         src_buffer.unmap(&self.device);

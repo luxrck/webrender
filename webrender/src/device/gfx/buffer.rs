@@ -12,7 +12,7 @@ use std::mem;
 
 pub const DOWNLOAD_BUFFER_SIZE: usize = 10 << 20; // 10MB
 
-pub(super) struct PMBuffer<B: hal::Backend> {
+pub(crate) struct PMBuffer<B: hal::Backend> {
     pub buffer: B::Buffer,
     pub memory_block: MemoryBlock<B>,
     pub coherent: bool,
@@ -25,6 +25,7 @@ pub(super) struct PMBuffer<B: hal::Backend> {
 
 impl<B: hal::Backend> PMBuffer<B> {
     pub(super) fn map<'a>(&'a mut self, device: &B::Device, size: Option<u64>) -> (MappedRange<'a, B>, u64) {
+        assert!(size.unwrap_or(0) < self.size);
         let size = size.unwrap_or(self.size);
         (self.memory_block.map(&device, 0..size).expect("Mapping memory block failed"), size)
     }
